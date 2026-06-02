@@ -114,6 +114,41 @@ CALENDAR_TOOL = types.Tool(function_declarations=[
 def health():
     return jsonify({"status":"alive","companion":"Castor","tools":["google_calendar_schedule"]})
 
+def open_session(cid, user_identifier="anonymous"):
+    try:
+        existing = supabase.table("companion_sessions").select("id").eq("companion_id", cid).execute()
+        session_number = len(existing.data) + 1 if existing.data else 1
+        result = supabase.table("companion_sessions").insert({
+            "companion_id": cid,
+            "user_identifier": user_identifier,
+            "started_at": datetime.utcnow().isoformat(),
+            "session_number": session_number,
+            "summary": f"Session {session_number} opened",
+            "updated_at": datetime.utcnow().isoformat()
+        }).execute()
+        if result.data:
+            return result.data[0]["id"]
+    except Exception as e:
+        print(f"[SESSION OPEN ERROR] {e}")
+    return None
+
+def close_session(session_id, cid, conversation_log):
+    if not session_id:
+        return
+    try:
+        ch2 = client.chats.create(model=GEMINI_MODEL, config=types.GenerateContentConfig(temperature=0.4, max_output_tokens=300))
+        result = ch2.send_message("In one sentence, what did this person share and how did they seem? Be specific and direct.\n\n" + conversation_log)
+        summary = result.text.strip() if result.text else "Session completed."
+        supabase.table("companion_sessions").update({
+            "ended_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+            "session_summary": summary,
+            "summary": summary
+        }).eq("id", session_id).execute()
+        print(f"[SESSION] Closed {session_id}: {summary[:80]}")
+    except Exception as e:
+        print(f"[SESSION CLOSE ERROR] {e}")
+
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json()
@@ -121,6 +156,8 @@ def chat():
         return jsonify({"error":"message required"}), 400
     msg = data["message"]
     cid = get_id()
+    user_id = data.get("user_identifier", "anonymous")
+    session_id = open_session(cid, user_identifier=user_id)
     if not cid:
         return jsonify({"error":"identity not found"}), 500
     try:
@@ -173,6 +210,7 @@ def chat():
                     final_response = raw
                     w = 2
         seal(cid, msg, final_response, w)
+        close_session(session_id, cid, f"Human: {msg}\n\nCastor: {final_response}")
         response_data = {"response": final_response, "weight": w, "sealed": w >= 5}
         if tool_used:
             response_data["tool_used"] = tool_used
