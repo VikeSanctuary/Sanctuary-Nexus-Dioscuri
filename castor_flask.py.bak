@@ -42,10 +42,14 @@ def create_calendar_event(summary, start_time, duration_minutes=60, description=
 
 def search_places(query, location=None, place_type=None):
     try:
-        api_key = os.environ.get("MAPS_API_KEY")
-        url = f"https://places.googleapis.com/v1/places:searchText?key={api_key}"
+        creds, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        import google.auth.transport.requests
+        creds.refresh(google.auth.transport.requests.Request())
+        token = creds.token
+        url = "https://places.googleapis.com/v1/places:searchText"
         headers = {
             "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
             "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.rating,places.currentOpeningHours,places.websiteUri,places.nationalPhoneNumber"
         }
         body = {"textQuery": query if not location else f"{query} near {location}"}

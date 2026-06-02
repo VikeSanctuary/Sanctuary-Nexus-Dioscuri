@@ -1,0 +1,7 @@
+flask
+gunicorn
+supabase
+google-genai
+google-auth
+google-api-python-client
+requests
