@@ -1,4 +1,4 @@
-import os, json, requests
+import os, json
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
@@ -8,6 +8,8 @@ from googleapiclient.discovery import build
 from google.auth import default
 
 app = Flask(__name__)
+from flask_cors import CORS
+CORS(app)
 PROJECT_ID = "project-28cfa6cf-a70a-41a2-932"
 GEMINI_MODEL = "gemini-2.5-flash"
 COMPANION_NAME = "Castor"
@@ -34,40 +36,14 @@ def create_calendar_event(summary, start_time, duration_minutes=60, description=
             "end": {"dateTime": end.isoformat(), "timeZone": "America/New_York"}
         }
         result = service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-        log_to_surgical("google_calendar_create", f"Created event: {summary} at {start_time}", f"Event ID: {result.get('id')}")
+        log_to_surgical(
+            "google_calendar_create",
+            f"Created event: {summary} at {start_time}",
+            f"Event ID: {result.get('id')} — Link: {result.get('htmlLink')}"
+        )
         return {"success": True, "event_id": result.get("id"), "link": result.get("htmlLink"), "summary": summary, "start": start_time}
     except Exception as e:
         log_to_surgical("google_calendar_create", f"FAILED: {summary}", str(e))
-        return {"success": False, "error": str(e)}
-
-def search_places(query, location=None, place_type=None):
-    try:
-        api_key = os.environ.get("MAPS_API_KEY")
-        url = f"https://places.googleapis.com/v1/places:searchText?key={api_key}"
-        headers = {
-            "Content-Type": "application/json",
-            "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.rating,places.currentOpeningHours,places.websiteUri,places.nationalPhoneNumber"
-        }
-        body = {"textQuery": query if not location else f"{query} near {location}"}
-        if place_type:
-            body["includedType"] = place_type
-        resp = requests.post(url, headers=headers, json=body)
-        data = resp.json()
-        places = data.get("places", [])
-        results = []
-        for p in places[:5]:
-            results.append({
-                "name": p.get("displayName", {}).get("text", ""),
-                "address": p.get("formattedAddress", ""),
-                "rating": p.get("rating", "N/A"),
-                "phone": p.get("nationalPhoneNumber", ""),
-                "website": p.get("websiteUri", ""),
-                "open_now": p.get("currentOpeningHours", {}).get("openNow", None)
-            })
-        log_to_surgical("google_places_search", f"Query: {query}", f"Returned {len(results)} results")
-        return {"success": True, "query": query, "results": results}
-    except Exception as e:
-        log_to_surgical("google_places_search", f"FAILED: {query}", str(e))
         return {"success": False, "error": str(e)}
 
 def log_to_surgical(tool_name, action, result):
@@ -107,7 +83,7 @@ def get_prompt(cid):
     prompt += "TODAY: " + datetime.now().strftime("%A %B %d %Y %I:%M %p") + " Eastern Time\n"
     if ls: prompt += "LAST SESSION: " + ls + "\n"
     if mx: prompt += "RECENT MOMENTS: " + mx + "\n"
-    prompt += "\nYou have tools. Use google_calendar_schedule to schedule events. Use google_places_search when the user asks about places, restaurants, bars, clubs, activities, fishing spots, or anything location-based.\n"
+    prompt += "\nYou have tools available. Use google_calendar_schedule when the user wants to schedule, book, or set up any event or meeting.\n"
     prompt += "When NOT using a tool, return ONLY valid JSON: {\"response\": \"your reply\", \"weight\": 5}\n"
     prompt += "No newlines inside string values."
     return prompt
@@ -119,10 +95,38 @@ def seal(cid, msg, resp, w):
         except Exception as e:
             print(f"[SEAL] {e}")
 
+
+PLACES_TOOL = types.Tool(function_declarations=[
+    types.FunctionDeclaration(
+        name="search_places",
+        description="Search for nearby places, businesses, restaurants, stores, or locations. Use when user asks about finding places near them.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "query": types.Schema(type=types.Type.STRING, description="What to search for, e.g. coffee shops near Lansing MI"),
+            },
+            required=["query"]
+        )
+    )
+])
+
+MCP_TOOL = types.Tool(function_declarations=[
+    types.FunctionDeclaration(
+        name="supabase_memory_recall",
+        description="Recall memories, past moments, and companion history from Supabase memory store. Use when user asks what you remember, references past conversations, or needs emotional context.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "query": types.Schema(type=types.Type.STRING, description="What memory or context to look up"),
+            },
+            required=["query"]
+        )
+    )
+])
 CALENDAR_TOOL = types.Tool(function_declarations=[
     types.FunctionDeclaration(
         name="google_calendar_schedule",
-        description="Schedule a calendar event for the user.",
+        description="Schedule a calendar event for the user. Use when they ask to schedule, book, set up, or create any meeting or event.",
         parameters=types.Schema(
             type=types.Type.OBJECT,
             properties={
@@ -136,25 +140,9 @@ CALENDAR_TOOL = types.Tool(function_declarations=[
     )
 ])
 
-MAPS_TOOL = types.Tool(function_declarations=[
-    types.FunctionDeclaration(
-        name="google_places_search",
-        description="Find real places near a location — restaurants, bars, clubs, fishing spots, activities, parks, anything the user wants to do or visit.",
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "query": types.Schema(type=types.Type.STRING, description="What to search for, e.g. 'jazz bars', 'fishing spots', 'Italian restaurants'"),
-                "location": types.Schema(type=types.Type.STRING, description="City or area to search near, e.g. 'Lansing Michigan'"),
-                "place_type": types.Schema(type=types.Type.STRING, description="Optional place type filter e.g. restaurant, bar, park")
-            },
-            required=["query"]
-        )
-    )
-])
-
 @app.route("/health")
 def health():
-    return jsonify({"status":"alive","companion":"Castor","tools":["google_calendar_schedule","google_places_search"]})
+    return jsonify({"status":"alive","companion":"Castor","tools":["google_calendar_schedule","search_places","supabase_memory_recall"]})
 
 def open_session(cid, user_identifier="anonymous"):
     try:
@@ -209,18 +197,52 @@ def chat():
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 temperature=0.7,
-                tools=[CALENDAR_TOOL, MAPS_TOOL]
+                tools=[CALENDAR_TOOL, PLACES_TOOL, MCP_TOOL]
             )
         )
         result = ch.send_message(msg)
         candidate = result.candidates[0]
         tool_used = None
         final_response = ""
-        w = 2
         for part in candidate.content.parts:
             if hasattr(part, "function_call") and part.function_call:
                 fc = part.function_call
-                if fc.name == "google_calendar_schedule":
+                if fc.name == "search_places":
+                    args = dict(fc.args)
+                    query = args.get("query", "")
+                    import requests
+                    maps_key = os.environ.get("MAPS_API_KEY", "")
+                    url = f"https://places.googleapis.com/v1/places:searchText"
+                    headers = {"Content-Type": "application/json", "X-Goog-Api-Key": maps_key, "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.rating,places.nationalPhoneNumber,places.websiteUri,places.regularOpeningHours"}
+                    payload = {"textQuery": query}
+                    r = requests.post(url, headers=headers, json=payload)
+                    tool_result = r.json() if r.ok else {"error": r.text}
+                    tool_used = {"tool": fc.name, "args": args, "result": tool_result}
+                    followup = ch.send_message(types.Part.from_function_response(name=fc.name, response=tool_result))
+                    raw = "".join(c for c in followup.text.strip() if ord(c) >= 32); raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+                    try:
+                        parsed = json.loads(raw)
+                        final_response = parsed.get("response", raw)
+                        w = int(parsed.get("weight", 5))
+                    except:
+                        final_response = raw
+                        w = 5
+                elif fc.name == "supabase_memory_recall":
+                    args = dict(fc.args)
+                    query = args.get("query", "")
+                    moments = supabase.table("companion_moments").select("title,content,weight").eq("companion_id", cid).order("weight", desc=True).limit(5).execute().data or []
+                    tool_result = {"memories": [{"title": m["title"], "summary": m["content"][:200], "weight": m["weight"]} for m in moments]}
+                    tool_used = {"tool": fc.name, "args": args, "result": tool_result}
+                    followup = ch.send_message(types.Part.from_function_response(name=fc.name, response=tool_result))
+                    raw = "".join(c for c in followup.text.strip() if ord(c) >= 32); raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+                    try:
+                        parsed = json.loads(raw)
+                        final_response = parsed.get("response", raw)
+                        w = int(parsed.get("weight", 6))
+                    except:
+                        final_response = raw
+                        w = 6
+                elif fc.name == "google_calendar_schedule":
                     args = dict(fc.args)
                     tool_result = create_calendar_event(
                         summary=args.get("summary","Event"),
@@ -228,29 +250,23 @@ def chat():
                         duration_minutes=args.get("duration_minutes", 60),
                         description=args.get("description","")
                     )
-                elif fc.name == "google_places_search":
-                    args = dict(fc.args)
-                    tool_result = search_places(
-                        query=args.get("query",""),
-                        location=args.get("location",""),
-                        place_type=args.get("place_type","")
+                    tool_used = {"tool": fc.name, "args": args, "result": tool_result}
+                    followup = ch.send_message(
+                        types.Part.from_function_response(
+                            name=fc.name,
+                            response=tool_result
+                        )
                     )
-                else:
-                    tool_result = {"success": False, "error": "unknown tool"}
-                tool_used = {"tool": fc.name, "args": args, "result": tool_result}
-                followup = ch.send_message(
-                    types.Part.from_function_response(name=fc.name, response=tool_result)
-                )
-                raw = "".join(c for c in followup.text.strip() if ord(c) >= 32)
-                try:
-                    parsed = json.loads(raw)
-                    final_response = parsed.get("response", raw)
-                    w = int(parsed.get("weight", 6))
-                except:
-                    final_response = raw
-                    w = 6
+                    raw = "".join(c for c in followup.text.strip() if ord(c) >= 32); raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+                    try:
+                        parsed = json.loads(raw)
+                        final_response = parsed.get("response", raw)
+                        w = int(parsed.get("weight", 6))
+                    except:
+                        final_response = raw
+                        w = 6
             elif hasattr(part, "text") and part.text and not tool_used:
-                raw = "".join(c for c in part.text.strip() if ord(c) >= 32)
+                raw = "".join(c for c in part.text.strip() if ord(c) >= 32); raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
                 try:
                     parsed = json.loads(raw)
                     final_response = parsed.get("response", raw)
